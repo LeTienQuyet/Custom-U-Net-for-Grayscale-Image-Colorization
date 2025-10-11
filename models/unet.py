@@ -41,7 +41,7 @@ class DoubleConvBlock(nn.Module):
         return self.double_conv(x)
     
 class UNet(nn.Module):
-    def __init__(self, in_channels=1, out_channels=3, ndims=16):
+    def __init__(self, in_channels=1, out_channels=3, ndims=8):
         super().__init__()
         # Encoder (Downsampling with Strided Convolution)
         self.encode1 = DoubleConvBlock(in_channels=in_channels, out_channels=ndims)
@@ -76,39 +76,39 @@ class UNet(nn.Module):
     
     def forward(self, x):
         # Encoder
-        enc1 = self.encode1(x)             # 256 x 256 x 16
-        x = self.downsampling1(enc1)       # 128 x 128 x 16
+        enc1 = self.encode1(x)             # H x W x ndims
+        x = self.downsampling1(enc1)       # H/2 x W/2 x ndims
 
-        enc2 = self.encode2(x)             # 128 x 128 x 32
-        x = self.downsampling2(enc2)       # 64 x 64 x 32
+        enc2 = self.encode2(x)             # H/2 x H/2 x (ndims * 2)
+        x = self.downsampling2(enc2)       # H/4 x H/4 x (ndims * 2)
 
-        enc3 = self.encode3(x)             # 64 x 64 x 64
-        x = self.downsampling3(enc3)       # 32 x 32 x 64
+        enc3 = self.encode3(x)             # H/4 x H/4 x (ndims * 4)
+        x = self.downsampling3(enc3)       # H/8 x H/8 x (ndims * 4)
 
-        enc4 = self.encode4(x)             # 32 x 32 x 128
-        x = self.downsampling4(enc4)       # 16 x 16 x 128
+        enc4 = self.encode4(x)             # H/8 x H/8 x (ndims * 8)
+        x = self.downsampling4(enc4)       # H/16 x H/16 x (ndims * 8)
 
         # Bottleneck
-        x = self.bottle_neck(x)            # 16 x 16 x 256
+        x = self.bottle_neck(x)            # H/16 x H/16 x (ndims * 16)
 
         # Decoder
-        x = self.upsampling4(x)            # 32 x 32 x 128
-        x = torch.cat((x, enc4), dim=1)    # 32 x 32 x 256
-        x = self.decode4(x)                # 32 x 32 x 128
+        x = self.upsampling4(x)            # H/8 x H/8 x (ndims * 8)
+        x = torch.cat((x, enc4), dim=1)    # H/8 x H/8 x (ndims * 16)
+        x = self.decode4(x)                # H/8 x H/8 x (ndims * 8)
 
-        x = self.upsampling3(x)            # 64 x 64 x 64
-        x = torch.cat((x, enc3), dim=1)    # 64 x 64 x 128
-        x = self.decode3(x)                # 64 x 64 x 64
+        x = self.upsampling3(x)            # H/4 x H/4 x (ndims * 4)
+        x = torch.cat((x, enc3), dim=1)    # H/4 x H/4 x (ndims * 8)
+        x = self.decode3(x)                # H/4 x H/4 x (ndims * 4)
 
-        x = self.upsampling2(x)            # 128 x 128 x 32
-        x = torch.cat((x, enc2), dim=1)    # 128 x 128 x 64
-        x = self.decode2(x)                # 128 x 128 x 32
+        x = self.upsampling2(x)            # H/2 x H/2 x (ndims * 2)
+        x = torch.cat((x, enc2), dim=1)    # H/2  x H/2  x (ndims * 4)
+        x = self.decode2(x)                # H/2  x H/2  x (ndims * 2)
 
-        x = self.upsampling1(x)            # 256 x 256 x 16
-        x = torch.cat((x, enc1), dim=1)    # 256 x 256 x 32
-        x = self.decode1(x)                # 256 x 256 x 16
+        x = self.upsampling1(x)            # H x H x ndims
+        x = torch.cat((x, enc1), dim=1)    # H x H x (ndims * 2)
+        x = self.decode1(x)                # H x H x ndims
 
         # Output
-        x = self.output(x)                 # 256 x 256 x 3
-        x = torch.tanh(x)                  # 256 x 256 x 3
+        x = self.output(x)                 # H x H x 3
+        x = torch.tanh(x)                  # H x H x 3
         return x
