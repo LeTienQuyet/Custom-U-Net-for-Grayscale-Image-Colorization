@@ -1,40 +1,40 @@
+from facenet_pytorch import InceptionResnetV1
+
 import torch
 import torch.nn as nn
-import torchvision.models as models
 
 class PerceptualLoss(nn.Module):
     def __init__(self, layer_ids=[3, 8, 15]):
         super().__init__()
-        vgg = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1).features
+        inception_restnet = InceptionResnetV1(pretrained="vggface2")
         self.blocks = nn.ModuleList([
-            vgg[:4].eval(),
-            vgg[4:9].eval(),
-            vgg[9:16].eval()
+            inception_restnet.conv2d_1a.eval(),
+            inception_restnet.conv2d_2a.eval(),
+            inception_restnet.conv2d_2b.eval(),
+            inception_restnet.conv2d_3b.eval(),
+            inception_restnet.conv2d_4a.eval(),
+            inception_restnet.conv2d_4b.eval(),
+            inception_restnet.repeat_1[0].eval()
         ])
+
         for block in self.blocks:
             for p in block.parameters():
                 p.requires_grad = False
 
-        self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
-        self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
-
         self.mse = nn.MSELoss()
 
     def forward(self, pred, target):
-        pred = (pred + 1.0) / 2.0
-        target = (target + 1.0) / 2.0
-
-        pred = (pred - self.mean) / self.std
-        target = (target - self.mean) / self.std
+        pred_ = (pred + 1.0) / 2.0
+        target_ = (target + 1.0) / 2.0
 
         loss = 0.0
 
-        with torch.no_grad():
-            x, y = pred.detach(), target.detach()
-            for block in self.blocks:
-                x = block(x)
+        x, y = pred_, target_.detach()
+        for block in self.blocks:
+            x = block(x)
+            with torch.no_grad():
                 y = block(y)
-                loss += self.mse(x, y)
+            loss += self.mse(x, y)
 
         return loss
 
