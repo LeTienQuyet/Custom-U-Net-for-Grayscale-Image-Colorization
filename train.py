@@ -137,12 +137,15 @@ def train_model(num_epochs, model, train_dataloader, val_dataloader, optimizer, 
             print(f"Save best model at Epoch {epoch} !!!\n")
 
     plot_loss(num_epochs, train_losses, val_losses, save_pth)
+    print(f"Completed training with best PSNR = {max_psnr}.")
 
 def main(num_epochs, ndims, lr, batch_size, alpha, save_pth, root, img_size):
     # Fixed random
     seed = 412
     random.seed(seed)
     torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
 
     # Preprare data for training
     train_dataloader = prepare_data(root=root, split="train", batch_size=batch_size, img_size=img_size)
@@ -158,6 +161,7 @@ def main(num_epochs, ndims, lr, batch_size, alpha, save_pth, root, img_size):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 
     criterion = CombinedLoss(alpha=alpha).to(device)
+    print(f"[LOSS]    Total loss = MSE loss + {alpha} * Perceptual loss")
 
     # Training phase
     train_model(
