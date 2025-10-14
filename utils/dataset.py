@@ -8,7 +8,7 @@ class ColorizationDataset(Dataset):
     def __init__(self, root="./data", split="train", img_size=256):
         self.root = root
         self.split = split
-        self.filenames = os.listdir(os.path.join(root, f"{split}_black"))
+        self.filenames = os.listdir(os.path.join(root, split))
 
         self.transform_black = transforms.Compose([
             transforms.Resize((img_size, img_size)),
@@ -29,14 +29,12 @@ class ColorizationDataset(Dataset):
     def __getitem__(self, idx):
         filename = self.filenames[idx]
 
-        file_black = os.path.join(self.root, f"{self.split}_black", filename)
-        file_color = os.path.join(self.root, f"{self.split}_color", filename)
+        file_path = os.path.join(self.root, self.split, filename)
+        img = Image.open(file_path)
 
-        img_black = Image.open(file_black)
-        img_color = Image.open(file_color)
+        img_black = self.transform_black(img)
+        img_color = self.transform_color(img)
 
-        img_black = self.transform_black(img_black)
-        img_color = self.transform_color(img_color)
         return img_black, img_color
 
 def prepare_data(root="./data", split="train", batch_size=64, img_size=256):
