@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 class PerceptualLoss(nn.Module):
-    def __init__(self, layer_ids=[3, 8, 15]):
+    def __init__(self):
         super().__init__()
         inception_restnet = InceptionResnetV1(pretrained="vggface2")
         self.blocks = nn.ModuleList([
@@ -13,8 +13,7 @@ class PerceptualLoss(nn.Module):
             inception_restnet.conv2d_2b.eval(),
             inception_restnet.conv2d_3b.eval(),
             inception_restnet.conv2d_4a.eval(),
-            inception_restnet.conv2d_4b.eval(),
-            inception_restnet.repeat_1[0].eval()
+            inception_restnet.conv2d_4b.eval()
         ])
 
         for block in self.blocks:
@@ -24,12 +23,9 @@ class PerceptualLoss(nn.Module):
         self.mse = nn.MSELoss()
 
     def forward(self, pred, target):
-        pred_ = (pred + 1.0) / 2.0
-        target_ = (target + 1.0) / 2.0
-
         loss = 0.0
 
-        x, y = pred_, target_.detach()
+        x, y = pred, target.detach()
         for block in self.blocks:
             x = block(x)
             with torch.no_grad():
