@@ -7,24 +7,53 @@ class DownSampling(nn.Module):
         self.downsampling = nn.Sequential(
             nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=False),
             nn.BatchNorm2d(num_features=out_channels),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=True)
         )
     
     def forward(self, x):
         return self.downsampling(x)
     
 class UpSampling(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=4, stride=2, padding=1):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
         super().__init__()
         self.upsampling = nn.Sequential(
-            nn.ConvTranspose2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=False),
+            nn.Upsample(scale_factor=2, mode="bilinear"),
+            nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=False),
             nn.BatchNorm2d(num_features=out_channels),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=True)
         )
     
     def forward(self, x):
         return self.upsampling(x)
-    
+
+class BottleneckAttention(nn.Module):
+    def __init__(self, in_channels, num_heads=8, dropout=0.25):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(embed_dim=in_channels, num_heads=num_heads, dropout=dropout, batch_first=True)
+        self.norm1 = nn.LayerNorm(in_channels)
+        self.ff = nn.Sequential(
+            nn.Linear(in_channels, 4 * in_channels),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * in_channels, in_channels),
+            nn.Dropout(dropout)
+        )
+        self.norm2 = nn.LayerNorm(in_channels)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        x_flat = x.view(B, C, H*W).permute(0, 2, 1)
+
+        # Self-attention block with Pre-LN
+        normalized = self.norm1(x_flat)
+        attn_out, _ = self.attn(normalized, normalized, normalized)
+        x = x_flat + attn_out
+        ff_out = self.ff(self.norm2(x))
+        x = x + ff_out
+
+        x = x.permute(0, 2, 1).view(B, C, H, W)
+        return x
+
 class DoubleConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
@@ -41,7 +70,7 @@ class DoubleConvBlock(nn.Module):
         return self.double_conv(x)
     
 class UNet(nn.Module):
-    def __init__(self, in_channels=1, out_channels=3, ndims=8):
+    def __init__(self, in_channels=1, out_channels=3, ndims=8, dropout=0.1):
         super().__init__()
         # Encoder (Downsampling with Strided Convolution)
         self.encode1 = DoubleConvBlock(in_channels=in_channels, out_channels=ndims)
@@ -57,17 +86,29 @@ class UNet(nn.Module):
         self.downsampling4 = DownSampling(in_channels=ndims*8, out_channels=ndims*8)
 
         # Bottleneck
-        self.bottle_neck = DoubleConvBlock(in_channels=ndims*8, out_channels=ndims*16)
+        self.bottle_neck = nn.Sequential(
+            DoubleConvBlock(in_channels=8*ndims, out_channels=16*ndims),
+            BottleneckAttention(in_channels=16*ndims, num_heads=ndims//2, dropout=dropout)
+        )
 
         # Decoder (Upsampling with Strided Deconvolution)
         self.upsampling4 = UpSampling(in_channels=ndims*16, out_channels=ndims*8)
-        self.decode4 = DoubleConvBlock(in_channels=ndims*16, out_channels=ndims*8)
+        self.decode4 = nn.Sequential(
+            DoubleConvBlock(in_channels=ndims*16, out_channels=ndims*8),
+            nn.Dropout(dropout)
+        )
 
         self.upsampling3 = UpSampling(in_channels=ndims*8, out_channels=ndims*4)
-        self.decode3 = DoubleConvBlock(in_channels=ndims*8, out_channels=ndims*4)
+        self.decode3 = nn.Sequential(
+            DoubleConvBlock(in_channels=ndims*8, out_channels=ndims*4),
+            nn.Dropout(dropout)
+        )
 
         self.upsampling2 = UpSampling(in_channels=ndims*4, out_channels=ndims*2)
-        self.decode2 = DoubleConvBlock(in_channels=ndims*4, out_channels=ndims*2)
+        self.decode2 = nn.Sequential(
+            DoubleConvBlock(in_channels=ndims*4, out_channels=ndims*2),
+            nn.Dropout(dropout)
+        )
 
         self.upsampling1 = UpSampling(in_channels=ndims*2, out_channels=ndims)
         self.decode1 = DoubleConvBlock(in_channels=ndims*2, out_channels=ndims)
