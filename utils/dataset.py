@@ -10,17 +10,24 @@ class ColorizationDataset(Dataset):
         self.split = split
         self.filenames = os.listdir(os.path.join(root, split))
 
-        self.transform_black = transforms.Compose([
-            transforms.Resize((img_size, img_size)),
-            transforms.Grayscale(num_output_channels=1),
+        if split == "train":
+            self.transform = transforms.Compose([
+                transforms.Resize((img_size, img_size)),
+                transforms.RandomHorizontalFlip()
+            ])
+        else:
+            self.transform = transforms.Compose([
+                transforms.Resize((img_size, img_size)),
+            ])
+
+        self.gray_transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(mean=(0.5, ), std=(0.5, ))
+            transforms.Normalize(mean=[0.5], std=[0.5])
         ])
 
-        self.transform_color = transforms.Compose([
-            transforms.Resize((img_size, img_size)),
+        self.color_transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
 
     def __len__(self):
@@ -28,14 +35,17 @@ class ColorizationDataset(Dataset):
 
     def __getitem__(self, idx):
         filename = self.filenames[idx]
-
         file_path = os.path.join(self.root, self.split, filename)
-        img = Image.open(file_path)
 
-        img_black = self.transform_black(img)
-        img_color = self.transform_color(img)
+        img = Image.open(file_path).convert("RGB")
+        img = self.transform(img)
 
-        return img_black, img_color
+        gray_img = transforms.Grayscale(num_output_channels=1)(img)
+
+        gray_tensor = self.gray_transform(gray_img)
+        color_tensor = self.color_transform(img)
+
+        return gray_tensor, color_tensor
 
 def prepare_data(root="./data", split="train", batch_size=64, img_size=256):
     dataset = ColorizationDataset(root, split, img_size)
