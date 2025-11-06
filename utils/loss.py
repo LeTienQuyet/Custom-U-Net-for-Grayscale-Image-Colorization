@@ -2,6 +2,7 @@ from facenet_pytorch import InceptionResnetV1
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class PerceptualLoss(nn.Module):
     def __init__(self):
@@ -11,9 +12,10 @@ class PerceptualLoss(nn.Module):
             inception_restnet.conv2d_1a.eval(),
             inception_restnet.conv2d_2a.eval(),
             inception_restnet.conv2d_2b.eval(),
+            inception_restnet.maxpool_3a.eval(),
             inception_restnet.conv2d_3b.eval(),
             inception_restnet.conv2d_4a.eval(),
-            inception_restnet.conv2d_4b.eval()
+            inception_restnet.conv2d_4b.eval(),
         ])
 
         for block in self.blocks:
@@ -23,8 +25,10 @@ class PerceptualLoss(nn.Module):
         self.mse = nn.MSELoss()
 
     def forward(self, pred, target):
-        loss = 0.0
+        pred = F.interpolate(pred, size=(160, 160), mode="bilinear", align_corners=False)
+        target = F.interpolate(target, size=(160, 160), mode="bilinear", align_corners=False)
 
+        loss = 0.0
         x, y = pred, target.detach()
         for block in self.blocks:
             x = block(x)
@@ -33,16 +37,3 @@ class PerceptualLoss(nn.Module):
             loss += self.mse(x, y)
 
         return loss
-
-class CombinedLoss(nn.Module):
-    def __init__(self, alpha=0.1):
-        super().__init__()
-        self.mse = nn.MSELoss()
-        self.percept = PerceptualLoss()
-        self.alpha = alpha
-
-    def forward(self, pred, target):
-        mse_loss = self.mse(pred, target)
-        percept_loss = self.percept(pred, target)
-        total_loss = mse_loss + self.alpha * percept_loss
-        return mse_loss, percept_loss, total_loss
