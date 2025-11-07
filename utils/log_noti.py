@@ -6,7 +6,7 @@ def log_table(epoch, train_mse_loss, train_percept_loss, train_lossGen, avg_val_
     print("-" * width)
 
     # Train loss
-    loss_str = f"MSE: {train_mse_loss:.4f}    Percept: {train_percept_loss:.4f}   Gen: {train_lossGen:.4f}"
+    loss_str = f"Pixel: {train_mse_loss:.4f}    Percept: {train_percept_loss:.4f}   Gen: {train_lossGen:.4f}"
     print(f"|{loss_str:^{width - 2}}|")
     print("-" * width)
 
