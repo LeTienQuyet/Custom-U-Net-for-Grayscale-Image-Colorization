@@ -8,21 +8,21 @@ class DoubleConvBlock(nn.Module):
             mid_channels = out_channels
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels=in_channels, out_channels=mid_channels, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(num_features=mid_channels),
-            nn.ReLU(inplace=True),
+            nn.InstanceNorm2d(num_features=mid_channels),
+            nn.GELU(),
             nn.Conv2d(in_channels=mid_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(num_features=out_channels),
-            nn.ReLU(inplace=True)
+            nn.InstanceNorm2d(num_features=out_channels),
+            nn.GELU()
         )
 
     def forward(self, x):
         return self.double_conv(x)
 
 class DownSampling(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=2, stride=2, padding=0):
+    def __init__(self, in_channels, out_channels, kernel_size=4, stride=2, padding=1):
         super().__init__()
         self.downsampling = nn.Sequential(
-            nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=True),
+            nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=False),
             DoubleConvBlock(in_channels=in_channels, out_channels=out_channels)
         )
 
