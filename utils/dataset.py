@@ -20,13 +20,11 @@ class ColorizationDataset(Dataset):
 
         self.gray_transform = transforms.Compose([
             transforms.Grayscale(num_output_channels=1),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=(0.5, ), std=(0.5, ))
+            transforms.ToTensor()
         ])
 
         self.color_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+            transforms.ToTensor()
         ])
 
     def __len__(self):
