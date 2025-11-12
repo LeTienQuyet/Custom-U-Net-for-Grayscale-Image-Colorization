@@ -1,8 +1,9 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class BlockAttention(nn.Module):
+class BottleNeck(nn.Module):
     def __init__(self, in_channels, dropout=0.2):
         super().__init__()
         num_heads = max(1, in_channels//64)
@@ -30,6 +31,28 @@ class BlockAttention(nn.Module):
         x = x.permute(0, 2, 1).view(B, C, H, W)
         return x
 
+class ECA(nn.Module):
+    def __init__(self, in_channels, gamma=2, b=1):
+        super(ECA, self).__init__()
+
+        t = int(abs((math.log2(in_channels) + b) / gamma))
+        k_size = t if t % 2 else t + 1
+
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)  # Global Average Pooling
+        self.conv = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=k_size, padding=k_size // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # Global average pooling → [B, C, 1, 1]
+        y = self.avg_pool(x)
+
+        y = y.squeeze(-1).transpose(-1, -2)  # [B, 1, C]
+        y = self.conv(y)
+        y = self.sigmoid(y)
+        y = y.transpose(-1, -2).unsqueeze(-1)  # [B, C, 1, 1]
+
+        return x * y.expand_as(x)
+
 class DoubleConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, mid_channels=None):
         super().__init__()
@@ -40,85 +63,106 @@ class DoubleConvBlock(nn.Module):
             nn.BatchNorm2d(num_features=mid_channels),
             nn.GELU(),
             nn.Conv2d(in_channels=mid_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1, bias=False),
-        )
-
-        self.residual = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=1, stride=1, padding=0, bias=False)
-
-        self.bn_act = nn.Sequential(
             nn.BatchNorm2d(num_features=out_channels),
             nn.GELU()
         )
 
+        self.eca = ECA(in_channels=out_channels)
+
     def forward(self, x):
         out = self.double_conv(x)
-        out = out + self.residual(x)
-        out = self.bn_act(out)
+        out = self.eca(out)
         return out
 
 class DownSampling(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, num_features):
         super().__init__()
         self.downsampling = nn.Sequential(
-            nn.Conv2d(in_channels=in_channels, out_channels=in_channels, kernel_size=4, stride=2, padding=1, bias=False),
-            DoubleConvBlock(in_channels=in_channels, out_channels=out_channels)
+            nn.MaxPool2d(kernel_size=2)
         )
+        self.encode = DoubleConvBlock(in_channels=num_features, out_channels=2*num_features)
 
     def forward(self, x):
-        return self.downsampling(x)
+        enc = self.encode(x)
+        x = self.downsampling(enc)
+        return enc, x
 
 class UpSampling(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, num_features):
         super().__init__()
-        self.up =  nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        mid_channels = (in_channels + out_channels)//2
-        self.conv = DoubleConvBlock(in_channels=in_channels+out_channels, out_channels=out_channels, mid_channels=mid_channels)
+        self.upsampling = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+        )
+        self.decode = DoubleConvBlock(in_channels=2*num_features, out_channels=num_features//2, mid_channels=num_features)
 
-    def forward(self, x1, x2):
-        x1 = self.up(x1)
-        x_merged = torch.cat((x2, x1), dim=1)
-        return self.conv(x_merged)
+    def forward(self, x, enc):
+        x = self.upsampling(x)
+        x_merged = torch.cat((x, enc), dim=1)
+        return self.decode(x_merged)
 
 class UNet(nn.Module):
     def __init__(self, in_channels=1, out_channels=3, ndims=8):
         super().__init__()
+
+        # Pre-process
+        self.pre_process = nn.Sequential(
+            nn.Conv2d(in_channels=in_channels, out_channels=ndims, kernel_size=3, stride=1, padding=1),
+            nn.GELU()
+        )
+
         # Encoder (Downsampling with Strided Convolution)
-        self.inc = DoubleConvBlock(in_channels=in_channels, out_channels=ndims)
+        self.encode1 = DownSampling(num_features=ndims)
 
-        self.downsampling1 = DownSampling(in_channels=ndims, out_channels=2*ndims)
-        self.downsampling2 = DownSampling(in_channels=2*ndims, out_channels=4*ndims)
-        self.downsampling3 = DownSampling(in_channels=4*ndims, out_channels=8*ndims)
-        self.downsampling4 = DownSampling(in_channels=8*ndims, out_channels=16*ndims)
+        self.encode2 = DownSampling(num_features=2*ndims)
 
-        self.bottle_neck = BlockAttention(in_channels=16*ndims)
+        self.encode3 = DownSampling(num_features=4*ndims)
+
+        self.encode4 = DownSampling(num_features=8*ndims)
+
+        # Bottle Neck
+        self.bottle_neck = BottleNeck(in_channels=16*ndims)
 
         # Decoder
-        self.upsampling4 = UpSampling(in_channels=16*ndims, out_channels=8*ndims)
-        self.upsampling3 = UpSampling(in_channels=8*ndims, out_channels=4*ndims)
-        self.upsampling2 = UpSampling(in_channels=4*ndims, out_channels=2*ndims)
-        self.upsampling1 = UpSampling(in_channels=2*ndims, out_channels=ndims)
+        self.decode4 = UpSampling(num_features=16*ndims)
 
-        # Output
-        self.output = nn.Sequential(
-            nn.Conv2d(in_channels=ndims, out_channels=out_channels, kernel_size=3, stride=1, padding=1),
-            nn.Tanh()
+        self.decode3 = UpSampling(num_features=8*ndims)
+
+        self.decode2 = UpSampling(num_features=4*ndims)
+
+        self.decode1 = UpSampling(num_features=2*ndims)
+
+        # Post-process
+        self.post_process = nn.Sequential(
+            nn.Conv2d(in_channels=ndims, out_channels=out_channels, kernel_size=1, stride=1, padding=0),
+            nn.Sigmoid()
         )
 
     def forward(self, x):
+        # Pre-process
+        x = self.pre_process(x)         # H x W x ndims
+
         # Encoder
-        x1 = self.inc(x)                   # H x W x ndims
-        x2 = self.downsampling1(x1)        # H/2 x W/2 x (2*ndims)
-        x3 = self.downsampling2(x2)        # H/4 x W/4 x (4*ndims)
-        x4 = self.downsampling3(x3)        # H/8 x W/8 x (8*ndims)
-        x5 = self.downsampling4(x4)        # H/16 x W/16 x (16*ndims)
+        enc1, x = self.encode1(x)       # H x W x (2*ndims)      || H/2 x W/2 x (2*ndims)
 
-        x5 = self.bottle_neck(x5)          # H/16 x W/16 x (16*ndims)
+        enc2, x = self.encode2(x)       # H/2 x W/2 x (4*ndims)  || H/4 x W/4 x (4*ndims)
 
-        #Decoder
-        x = self.upsampling4(x5, x4)       # H/8 x W/8 x (8*ndims)
-        x = self.upsampling3(x, x3)        # H/4 x W/4 x (4*ndims)
-        x = self.upsampling2(x, x2)        # H/2 x W/2 x (2*ndims)
-        x = self.upsampling1(x, x1)        # H x W x ndims
+        enc3, x = self.encode3(x)       # H/4 x W/4 x (8*ndims)  || H/8 x W/8 x (8*ndims)
 
-        # # Output
-        x = self.output(x)                 # H x H x 3
+        enc4, x = self.encode4(x)       # H/8 x W/8 x (16*ndims) || H/16 x W/16 x (16*ndims)
+
+        # Bottle Neck
+        x = self.bottle_neck(x)         # H/16 x W/16 x (16*ndims)
+
+        # Decoder
+        x = self.decode4(x, enc4)       # H/8 x W/8 x (8*ndims)
+
+        x = self.decode3(x, enc3)       # H/4 x W/4 x (4*ndims)
+
+        x = self.decode2(x, enc2)       # H/2 x W/2 x (2*ndims)
+
+        x = self.decode1(x, enc1)       # H x W x ndims
+
+        # Post-process
+        x = self.post_process(x)        # H x W x 3
+
         return x
