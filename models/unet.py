@@ -7,6 +7,12 @@ class BottleNeck(nn.Module):
     def __init__(self, in_channels, dropout=0.2):
         super().__init__()
         num_heads = max(1, in_channels//64)
+
+        self.proj_in = nn.Linear(in_features=in_channels, out_features=in_channels)
+        self.proj_out = nn.Linear(in_features=in_channels, out_features=in_channels)
+
+        self.alpha = nn.Parameter(torch.tensor(1.0))
+
         self.attn = nn.MultiheadAttention(embed_dim=in_channels, num_heads=num_heads, dropout=dropout, batch_first=True)
         self.norm1 = nn.LayerNorm(in_channels)
         self.ff = nn.Sequential(
@@ -22,13 +28,20 @@ class BottleNeck(nn.Module):
         B, C, H, W = x.shape
         x_flat = x.view(B, C, H * W).permute(0, 2, 1)
 
+        # In projection
+        x_flat = self.proj_in(x_flat)
+
         # Self-attention block with Pre-LN
         normalized = self.norm1(x_flat)
         attn_out, _ = self.attn(normalized, normalized, normalized)
-        x = x_flat + attn_out
-        ff_out = self.ff(self.norm2(x))
-        x = x + ff_out
-        x = x.permute(0, 2, 1).view(B, C, H, W)
+        x_flat = x_flat + attn_out * self.alpha
+        ff_out = self.ff(self.norm2(x_flat))
+        x_flat = x_flat + ff_out * self.alpha
+
+        # Out projection
+        x_flat = self.proj_out(x_flat)
+
+        x = x_flat.permute(0, 2, 1).view(B, C, H, W)
         return x
 
 class ECA(nn.Module):
@@ -74,7 +87,7 @@ class DoubleConvBlock(nn.Module):
         out = self.eca(out)
         return out
 
-class DownSampling(nn.Module):
+class EncoderBlock(nn.Module):
     def __init__(self, num_features):
         super().__init__()
         self.downsampling = nn.Sequential(
@@ -87,11 +100,12 @@ class DownSampling(nn.Module):
         x = self.downsampling(enc)
         return enc, x
 
-class UpSampling(nn.Module):
+class DecoderBlock(nn.Module):
     def __init__(self, num_features):
         super().__init__()
         self.upsampling = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+            nn.Conv2d(in_channels=num_features, out_channels=num_features, kernel_size=3, stride=1, padding=1)
         )
         self.decode = DoubleConvBlock(in_channels=2*num_features, out_channels=num_features//2, mid_channels=num_features)
 
@@ -111,25 +125,25 @@ class UNet(nn.Module):
         )
 
         # Encoder (Downsampling with Strided Convolution)
-        self.encode1 = DownSampling(num_features=ndims)
+        self.encode1 = EncoderBlock(num_features=ndims)
 
-        self.encode2 = DownSampling(num_features=2*ndims)
+        self.encode2 = EncoderBlock(num_features=2*ndims)
 
-        self.encode3 = DownSampling(num_features=4*ndims)
+        self.encode3 = EncoderBlock(num_features=4*ndims)
 
-        self.encode4 = DownSampling(num_features=8*ndims)
+        self.encode4 = EncoderBlock(num_features=8*ndims)
 
         # Bottle Neck
         self.bottle_neck = BottleNeck(in_channels=16*ndims)
 
         # Decoder
-        self.decode4 = UpSampling(num_features=16*ndims)
+        self.decode4 = DecoderBlock(num_features=16*ndims)
 
-        self.decode3 = UpSampling(num_features=8*ndims)
+        self.decode3 = DecoderBlock(num_features=8*ndims)
 
-        self.decode2 = UpSampling(num_features=4*ndims)
+        self.decode2 = DecoderBlock(num_features=4*ndims)
 
-        self.decode1 = UpSampling(num_features=2*ndims)
+        self.decode1 = DecoderBlock(num_features=2*ndims)
 
         # Post-process
         self.post_process = nn.Sequential(
