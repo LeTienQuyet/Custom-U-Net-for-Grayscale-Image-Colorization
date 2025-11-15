@@ -3,21 +3,48 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class BottleNeck(nn.Module):
+class PositionalEncoding(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.in_channels = in_channels
+
+    def _build(self, n, dim, device):
+        pos = torch.arange(n, dtype=torch.float, device=device).unsqueeze(1) #[n, 1]
+        div = torch.exp(
+            torch.arange(0, dim, 2, device=device).float() *
+            (-math.log(10000.0) / dim)
+        ) # [dim / 2]
+        pe =  torch.zeros(n, dim, device=device) # [n, dim]
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div)
+
+        return pe
+
+    def forward(self, h, w, device):
+        half_dim = self.in_channels // 2
+
+        # Embed for height
+        pe_h = self._build(h, half_dim, device)
+
+        # Embed for width
+        pe_w = self._build(w, half_dim, device)
+
+        # Combine both
+        pe_h = pe_h.unsqueeze(1).expand(-1, w, -1)
+        pe_w = pe_w.unsqueeze(0).expand(h, -1, -1)
+
+        pe = torch.cat([pe_h, pe_w], dim=-1)
+        return pe.reshape(h * w, self.in_channels).unsqueeze(0)
+
+class TransformerEncoder(nn.Module):
     def __init__(self, in_channels, dropout=0.2):
         super().__init__()
         num_heads = max(1, in_channels//64)
-
-        self.proj_in = nn.Linear(in_features=in_channels, out_features=in_channels)
-        self.proj_out = nn.Linear(in_features=in_channels, out_features=in_channels)
-
-        self.alpha = nn.Parameter(torch.tensor(1.0))
-
         self.attn = nn.MultiheadAttention(embed_dim=in_channels, num_heads=num_heads, dropout=dropout, batch_first=True)
         self.norm1 = nn.LayerNorm(in_channels)
         self.ff = nn.Sequential(
             nn.Linear(in_channels, 4 * in_channels),
-            nn.GELU(),
+            nn.SiLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(4 * in_channels, in_channels),
             nn.Dropout(dropout)
@@ -25,18 +52,41 @@ class BottleNeck(nn.Module):
         self.norm2 = nn.LayerNorm(in_channels)
 
     def forward(self, x):
+        # Self-attention block with Pre-LN
+        normalized = self.norm1(x)
+        attn_out, _ = self.attn(normalized, normalized, normalized)
+        x = x + attn_out
+        ff_out = self.ff(self.norm2(x))
+        x = x + ff_out
+        return x
+
+class BottleNeck(nn.Module):
+    def __init__(self, in_channels, num_blocks=1):
+        super().__init__()
+
+        self.proj_in = nn.Linear(in_features=in_channels, out_features=in_channels)
+        self.proj_out = nn.Linear(in_features=in_channels, out_features=in_channels)
+
+        self.pos_enc = PositionalEncoding(in_channels=in_channels)
+
+        self.blocks = nn.ModuleList([
+            TransformerEncoder(in_channels) for _ in range(num_blocks)
+        ])
+
+    def forward(self, x):
         B, C, H, W = x.shape
         x_flat = x.view(B, C, H * W).permute(0, 2, 1)
+
+        # Add poistion encoding
+        pe = self.pos_enc(H, W, x.device)
+        x_flat = x_flat + pe
 
         # In projection
         x_flat = self.proj_in(x_flat)
 
-        # Self-attention block with Pre-LN
-        normalized = self.norm1(x_flat)
-        attn_out, _ = self.attn(normalized, normalized, normalized)
-        x_flat = x_flat + attn_out * self.alpha
-        ff_out = self.ff(self.norm2(x_flat))
-        x_flat = x_flat + ff_out * self.alpha
+        # N x Self-attention block with Pre-LN
+        for block in self.blocks:
+            x_flat = block(x_flat)
 
         # Out projection
         x_flat = self.proj_out(x_flat)
@@ -73,11 +123,11 @@ class DoubleConvBlock(nn.Module):
             mid_channels = out_channels
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels=in_channels, out_channels=mid_channels, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(num_features=mid_channels),
-            nn.GELU(),
+            nn.InstanceNorm2d(num_features=mid_channels),
+            nn.SiLU(inplace=True),
             nn.Conv2d(in_channels=mid_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(num_features=out_channels),
-            nn.GELU()
+            nn.InstanceNorm2d(num_features=out_channels),
+            nn.SiLU(inplace=True)
         )
 
         self.eca = ECA(in_channels=out_channels)
@@ -115,13 +165,13 @@ class DecoderBlock(nn.Module):
         return self.decode(x_merged)
 
 class UNet(nn.Module):
-    def __init__(self, in_channels=1, out_channels=3, ndims=8):
+    def __init__(self, in_channels=1, out_channels=3, ndims=16, num_blocks=1):
         super().__init__()
 
         # Pre-process
         self.pre_process = nn.Sequential(
             nn.Conv2d(in_channels=in_channels, out_channels=ndims, kernel_size=3, stride=1, padding=1),
-            nn.GELU()
+            nn.SiLU(inplace=True)
         )
 
         # Encoder (Downsampling with Strided Convolution)
@@ -134,7 +184,7 @@ class UNet(nn.Module):
         self.encode4 = EncoderBlock(num_features=8*ndims)
 
         # Bottle Neck
-        self.bottle_neck = BottleNeck(in_channels=16*ndims)
+        self.bottle_neck = BottleNeck(in_channels=16*ndims, num_blocks=num_blocks)
 
         # Decoder
         self.decode4 = DecoderBlock(num_features=16*ndims)
