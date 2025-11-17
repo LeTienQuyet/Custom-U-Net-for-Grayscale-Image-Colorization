@@ -123,10 +123,10 @@ class DoubleConvBlock(nn.Module):
             mid_channels = out_channels
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels=in_channels, out_channels=mid_channels, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.InstanceNorm2d(num_features=mid_channels),
+            nn.BatchNorm2d(num_features=mid_channels),
             nn.SiLU(inplace=True),
             nn.Conv2d(in_channels=mid_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.InstanceNorm2d(num_features=out_channels),
+            nn.BatchNorm2d(num_features=out_channels),
             nn.SiLU(inplace=True)
         )
 
