@@ -1,7 +1,6 @@
 import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 class PositionalEncoding(nn.Module):
     def __init__(self, in_channels):
@@ -23,11 +22,21 @@ class PositionalEncoding(nn.Module):
     def forward(self, h, w, device):
         half_dim = self.in_channels // 2
 
+        # Check buffer
+
         # Embed for height
-        pe_h = self._build(h, half_dim, device)
+        if not hasattr(self, f'pe_h_{h}_{half_dim}'):
+            pe_h = self._build(h, half_dim, device)
+            self.register_buffer(f'pe_h_{h}_{half_dim}', pe_h, persistent=True)
+        else:
+            pe_h = getattr(self, f'pe_h_{h}_{half_dim}').to(device)
 
         # Embed for width
-        pe_w = self._build(w, half_dim, device)
+        if not hasattr(self, f'pe_w_{w}_{half_dim}'):
+            pe_w = self._build(w, half_dim, device)
+            self.register_buffer(f'pe_w_{w}_{half_dim}', pe_w, persistent=True)
+        else:
+            pe_w = getattr(self, f'pe_w_{w}_{half_dim}').to(device)
 
         # Combine both
         pe_h = pe_h.unsqueeze(1).expand(-1, w, -1)
@@ -39,7 +48,7 @@ class PositionalEncoding(nn.Module):
 class TransformerEncoder(nn.Module):
     def __init__(self, in_channels, dropout=0.2):
         super().__init__()
-        num_heads = max(1, in_channels//64)
+        num_heads = min(8, max(1, in_channels // 64))
         self.attn = nn.MultiheadAttention(embed_dim=in_channels, num_heads=num_heads, dropout=dropout, batch_first=True)
         self.norm1 = nn.LayerNorm(in_channels)
         self.ff = nn.Sequential(
