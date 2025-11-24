@@ -1,8 +1,11 @@
 # Image Colorization on CelebA-HQ Dataset
-This project focuses on **Image Colorization** for human face images, primarily using a **U-Net** architecture, while also exploring the use of **PatchGAN** to potentially enhance the realism and overall visual quality of the generated colorized images.
+This project focuses on **Image colorization** for human face images, primarily using a **U-Net** architecture to generate realistic and visually appealing colorized results.
 ## Architecture
 The model is based on a U-Net architecture (see the figure below) inspired by **UVCGAN** [1].
-![unet_architecture](images/unet_architecture.png)
+<p align="center">
+    <img src="images/unet_architecture.png" alt="U-Net architecture"/>
+</p>
+
 ## Experiments
 The model is trained with the following settings: 
 ```python
@@ -16,17 +19,22 @@ optimizer = Adam(lr=0.0004, betas=(0.5, 0.999))
 The following table presents a detailed comparison of the model's performance when trained using different combinations of loss functions:
 <div align="center">
 
-| Model |  Loss Function | PSNR ↑ | SSIM ↑ |
-| :--: | :--: | :--: | :--: |
-| U-Net | $\alpha \mathcal{L_1}$ + $\beta \mathcal{L_{percept}}$ | 24.7722 | 0.9438 |
-| U-Net + PatchGAN | $\alpha \mathcal{L_1}$ + $\beta \mathcal{L_{percept}}$ + $\theta \mathcal{L_{adv}} $  | **25.2202**| **0.9569** |
-| U-Net | $\alpha \mathcal{L_2}$ + $\beta \mathcal{L_{percept}}$ | 24.5076 | 0.9397 |
-| U-Net + PatchGAN | $\alpha \mathcal{L_2}$ + $\beta \mathcal{L_{percept}}$ + $\theta \mathcal{L_{adv}} $ | 25.13 | 0.95 |
+|  Loss Function | $\mathbf{PSNR}_{Lab}\uparrow$ | $\mathbf{SSIM}_{Lab}\uparrow$ |
+| :--: | :--: | :--: |
+|  |  |  |
+|   | |  |
+| |  |  |
+|  |  |  |
 
 </div>
-
 The images below illustrate a visual comparison of the results obtained using different loss functions:
-![diff_loss](images/diff_loss.png)
+<p align="center">
+    <img src="images/diff_loss.png" alt="Image for diff loss"/>
+</p>
+
+*Several experiments were conducted to evaluate different design choices in the colorization process. Two key observations emerged:*
+* **Color space comparison**: Predicting **ab** channels from **L** yields better colorization results than directly predicting **RGB** values.
+* **Effect of PatchGAN**: Incorporating **PatchGAN**—whether in the VanillaGAN or LSGAN setup—deteriorates the visual quality, leading to less realistic colorized images.
 ## References
 [1] **Dmitrii Torbunov**, **Yi Huang**, **Haiwang Yu**, **Jin Huang**,
  **Shinjae Yoo**, **Meifeng Lin**, **Brett Viren**, **Yihui Ren** (2022). *UVCGAN: UNetVision Transformer cycle-consistent GAN for unpaired
