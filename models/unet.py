@@ -150,7 +150,8 @@ class EncoderBlock(nn.Module):
     def __init__(self, num_features):
         super().__init__()
         self.downsampling = nn.Sequential(
-            nn.MaxPool2d(kernel_size=2)
+            # nn.MaxPool2d(kernel_size=2)
+            nn.Conv2d(in_channels=2*num_features, out_channels=2*num_features, kernel_size=4, stride=2, padding=1)
         )
         self.encode = DoubleConvBlock(in_channels=num_features, out_channels=2*num_features)
 
