@@ -25,7 +25,6 @@ def get_args():
     parser.add_argument("--theta", type=float, help="Weight of Generator Loss", default=0.02)
     parser.add_argument("--color_mode", type=str, help="Use Lab or RGB for training", default="lab")
     parser.add_argument("--type_loss", type=str, help="L1 or MSE for pixel loss", default="L1")
-    parser.add_argument("--use_gan", type=str2bool, nargs="?", const=True, help="Use GAN for training with U-Net", default=False)
 
     args = parser.parse_args()
     return args
