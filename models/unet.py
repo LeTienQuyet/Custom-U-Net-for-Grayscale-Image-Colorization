@@ -105,7 +105,7 @@ class BottleNeck(nn.Module):
 
 class ECA(nn.Module):
     def __init__(self, in_channels, gamma=2, b=1):
-        super(ECA, self).__init__()
+        super().__init__()
 
         t = int(abs((math.log2(in_channels) + b) / gamma))
         k_size = t if t % 2 else t + 1
@@ -150,8 +150,9 @@ class EncoderBlock(nn.Module):
     def __init__(self, num_features):
         super().__init__()
         self.downsampling = nn.Sequential(
-            # nn.MaxPool2d(kernel_size=2)
-            nn.Conv2d(in_channels=2*num_features, out_channels=2*num_features, kernel_size=4, stride=2, padding=1)
+            nn.Conv2d(in_channels=2*num_features, out_channels=2*num_features, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(num_features=2*num_features),
+            nn.SiLU(inplace=True)
         )
         self.encode = DoubleConvBlock(in_channels=num_features, out_channels=2*num_features)
 
@@ -160,22 +161,74 @@ class EncoderBlock(nn.Module):
         x = self.downsampling(enc)
         return enc, x
 
+class AttentionGate(nn.Module):
+    def __init__(self, F_dec, F_enc, n_coefficients=None):
+        """
+        Attention Gate for skip connection in U-Net
+        :param F_dec: number of channels in decoder feature map (gating signal)
+        :param F_enc: number of channels in corresponding encoder feature map (skip connection)
+        :param n_coefficients: number of intermediate channels for attention (optional)
+        """
+        super().__init__()
+
+        if n_coefficients is None:
+            n_coefficients = F_enc // 2
+
+        # Linear projection for decoder feature (gating signal)
+        self.W_dec = nn.Sequential(
+            nn.Conv2d(in_channels=F_dec, out_channels=n_coefficients, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(num_features=n_coefficients)
+        )
+
+        # Linear projection for encoder feature (skip connection)
+        self.W_enc = nn.Sequential(
+            nn.Conv2d(in_channels=F_enc, out_channels=n_coefficients, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(num_features=n_coefficients)
+        )
+
+        # Phi: create 1-channel attention map
+        self.phi = nn.Sequential(
+            nn.Conv2d(in_channels=n_coefficients, out_channels=1, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(num_features=1),
+            nn.Sigmoid()
+        )
+
+        self.act = nn.SiLU(inplace=True)
+
+    def forward(self, dec, enc):
+        """
+        Forward pass for Attention Gate
+        :param dec: feature from decoder layer (gating signal)
+        :param enc: feature from corresponding encoder layer (skip connection)
+        :return: filtered encoder feature weighted by pixel-wise attention
+        """
+        # Project decoder feature
+        gate = self.W_dec(dec)   # [B, n_coefficients, H, W]
+        x = self.W_enc(enc)      # [B, n_coefficients, H, W]
+        y = self.act(gate + x)   # [B, n_coefficients, H, W]
+        y = self.phi(y)          # [B, 1, H, W]
+        return y * enc           # [B, F_enc, H, W]
+
 class DecoderBlock(nn.Module):
     def __init__(self, num_features):
         super().__init__()
         self.upsampling = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
-            nn.Conv2d(in_channels=num_features, out_channels=num_features, kernel_size=3, stride=1, padding=1)
+            nn.Conv2d(in_channels=num_features, out_channels=num_features, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(num_features=num_features),
+            nn.SiLU(inplace=True)
         )
+        self.attn_gate = AttentionGate(F_dec=num_features, F_enc=num_features, n_coefficients=num_features//2)
         self.decode = DoubleConvBlock(in_channels=2*num_features, out_channels=num_features//2, mid_channels=num_features)
 
     def forward(self, x, enc):
         x = self.upsampling(x)
+        enc = self.attn_gate(x, enc)
         x_merged = torch.cat((x, enc), dim=1)
         return self.decode(x_merged)
 
 class UNet(nn.Module):
-    def __init__(self, in_channels=1, out_channels=3, ndims=16, num_blocks=1):
+    def __init__(self, in_channels=1, out_channels=2, ndims=16, num_blocks=1):
         super().__init__()
 
         # Pre-process
@@ -237,6 +290,6 @@ class UNet(nn.Module):
         x = self.decode1(x, enc1)       # H x W x ndims
 
         # Post-process
-        x = self.post_process(x)        # H x W x 3
+        x = self.post_process(x)        # H x W x out_channels
 
         return x
