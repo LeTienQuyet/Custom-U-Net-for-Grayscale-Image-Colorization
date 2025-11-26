@@ -19,12 +19,12 @@ optimizer = Adam(lr=0.0002, betas=(0.5, 0.999))
 The results below are obtained using the same model architecture *(**ndims=16**, **num_blocks=1**)* with only the loss functions varying.
 <div align="center">
 
-|  Loss Function | $\mathbf{PSNR}_{Lab}\uparrow$ | $\mathbf{SSIM}_{Lab}\uparrow$ |
-| :--: | :--: | :--: |
-| $\alpha\mathcal{L}_2 + \beta\mathcal{L}_{percept}$ | $25.1490^{\scriptscriptstyle 3}$ | $0.9630^{\scriptscriptstyle 3}$ |
-| $\alpha\mathcal{L}_2 + \beta\mathcal{L}_{percept} + \theta\mathcal{L}_{G}$| $24.8835^{\scriptscriptstyle 4}$ | $0.9595^{\scriptscriptstyle 4}$ |
-| $\alpha\mathcal{L}_1 + \beta\mathcal{L}_{percept}$  | $25.2308^{\scriptscriptstyle 1}$ | $0.9640^{\scriptscriptstyle 1}$ |
-| $\alpha\mathcal{L}_1 + \beta\mathcal{L}_{percept} + \theta\mathcal{L}_{G}$ | $25.1886^{\scriptscriptstyle 2}$ | $0.9632^{\scriptscriptstyle 2}$ |
+|  Loss Function | $\mathbf{PSNR}_{Lab}\uparrow$ | $\mathbf{SSIM}_{Lab}\uparrow$ | $\mathbf{CF}_{Lab}\uparrow$ | $\Delta\mathbf{CF}_{Lab}\downarrow$ |
+| :--: | :--: | :--: |:--: | :--: |
+| $\alpha\mathcal{L}_2 + \beta\mathcal{L}_{percept}$ | $25.1490^{\scriptscriptstyle 3}$ | $0.9630^{\scriptscriptstyle 3}$ | $37.9796^{\scriptscriptstyle 3}$ | $10.7965^{\scriptscriptstyle 2}$ |
+| $\alpha\mathcal{L}_2 + \beta\mathcal{L}_{percept} + \theta\mathcal{L}_{G}$| $24.8835^{\scriptscriptstyle 4}$ | $0.9595^{\scriptscriptstyle 4}$ | $38.3778^{\scriptscriptstyle 2}$| $10.9494^{\scriptscriptstyle 3}$|
+| $\alpha\mathcal{L}_1 + \beta\mathcal{L}_{percept}$  | $25.2308^{\scriptscriptstyle 1}$ | $0.9640^{\scriptscriptstyle 1}$ | $36.7373^{\scriptscriptstyle 4}$| $11.2748^{\scriptscriptstyle 4}$ |
+| $\alpha\mathcal{L}_1 + \beta\mathcal{L}_{percept} + \theta\mathcal{L}_{G}$ | $25.1886^{\scriptscriptstyle 2}$ | $0.9632^{\scriptscriptstyle 2}$ | $38.6980^{\scriptscriptstyle 1}$ | $10.2842^{\scriptscriptstyle 1}$|
 
 </div>
 <p align="center">
