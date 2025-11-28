@@ -22,8 +22,6 @@ class PositionalEncoding(nn.Module):
     def forward(self, h, w, device):
         half_dim = self.in_channels // 2
 
-        # Check buffer
-
         # Embed for height
         if not hasattr(self, f'pe_h_{h}_{half_dim}'):
             pe_h = self._build(h, half_dim, device)
@@ -46,7 +44,7 @@ class PositionalEncoding(nn.Module):
         return pe.reshape(h * w, self.in_channels).unsqueeze(0)
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, in_channels, dropout=0.2):
+    def __init__(self, in_channels, dropout=0.3):
         super().__init__()
         num_heads = min(8, max(1, in_channels // 64))
         self.attn = nn.MultiheadAttention(embed_dim=in_channels, num_heads=num_heads, dropout=dropout, batch_first=True)
@@ -150,9 +148,7 @@ class EncoderBlock(nn.Module):
     def __init__(self, num_features):
         super().__init__()
         self.downsampling = nn.Sequential(
-            nn.Conv2d(in_channels=2*num_features, out_channels=2*num_features, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(num_features=2*num_features),
-            nn.SiLU(inplace=True)
+            nn.Conv2d(in_channels=2*num_features, out_channels=2*num_features, kernel_size=4, stride=2, padding=1, bias=False)
         )
         self.encode = DoubleConvBlock(in_channels=num_features, out_channels=2*num_features)
 
@@ -176,14 +172,12 @@ class AttentionGate(nn.Module):
 
         # Linear projection for decoder feature (gating signal)
         self.W_dec = nn.Sequential(
-            nn.Conv2d(in_channels=F_dec, out_channels=n_coefficients, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(num_features=n_coefficients)
+            nn.Conv2d(in_channels=F_dec, out_channels=n_coefficients, kernel_size=1, stride=1, padding=0, bias=True)
         )
 
         # Linear projection for encoder feature (skip connection)
         self.W_enc = nn.Sequential(
-            nn.Conv2d(in_channels=F_enc, out_channels=n_coefficients, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(num_features=n_coefficients)
+            nn.Conv2d(in_channels=F_enc, out_channels=n_coefficients, kernel_size=1, stride=1, padding=0, bias=True)
         )
 
         # Phi: create 1-channel attention map
@@ -214,9 +208,7 @@ class DecoderBlock(nn.Module):
         super().__init__()
         self.upsampling = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
-            nn.Conv2d(in_channels=num_features, out_channels=num_features, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(num_features=num_features),
-            nn.SiLU(inplace=True)
+            nn.Conv2d(in_channels=num_features, out_channels=num_features, kernel_size=3, stride=1, padding=1, bias=False)
         )
         self.attn_gate = AttentionGate(F_dec=num_features, F_enc=num_features, n_coefficients=num_features//2)
         self.decode = DoubleConvBlock(in_channels=2*num_features, out_channels=num_features//2, mid_channels=num_features)
@@ -228,7 +220,7 @@ class DecoderBlock(nn.Module):
         return self.decode(x_merged)
 
 class UNet(nn.Module):
-    def __init__(self, in_channels=1, out_channels=2, ndims=16, num_blocks=1):
+    def __init__(self, in_channels=1, out_channels=2, ndims=16, num_blocks=1, depths=4):
         super().__init__()
 
         # Pre-process
@@ -237,26 +229,18 @@ class UNet(nn.Module):
             nn.SiLU(inplace=True)
         )
 
-        # Encoder (Downsampling with Strided Convolution)
-        self.encode1 = EncoderBlock(num_features=ndims)
-
-        self.encode2 = EncoderBlock(num_features=2*ndims)
-
-        self.encode3 = EncoderBlock(num_features=4*ndims)
-
-        self.encode4 = EncoderBlock(num_features=8*ndims)
+        # Encoder
+        self.encoders = nn.ModuleList()
+        for i in range(depths):
+            self.encoders.append(EncoderBlock(num_features=ndims*(2**i)))
 
         # Bottle Neck
-        self.bottle_neck = BottleNeck(in_channels=16*ndims, num_blocks=num_blocks)
+        self.bottle_neck = BottleNeck(in_channels=ndims*(2**depths), num_blocks=num_blocks)
 
         # Decoder
-        self.decode4 = DecoderBlock(num_features=16*ndims)
-
-        self.decode3 = DecoderBlock(num_features=8*ndims)
-
-        self.decode2 = DecoderBlock(num_features=4*ndims)
-
-        self.decode1 = DecoderBlock(num_features=2*ndims)
+        self.decoders = nn.ModuleList()
+        for i in range(depths):
+            self.decoders.append(DecoderBlock(num_features=ndims*(2**(depths-i))))
 
         # Post-process
         self.post_process = nn.Sequential(
@@ -266,30 +250,21 @@ class UNet(nn.Module):
 
     def forward(self, x):
         # Pre-process
-        x = self.pre_process(x)         # H x W x ndims
+        x = self.pre_process(x)
 
         # Encoder
-        enc1, x = self.encode1(x)       # H x W x (2*ndims)      || H/2 x W/2 x (2*ndims)
-
-        enc2, x = self.encode2(x)       # H/2 x W/2 x (4*ndims)  || H/4 x W/4 x (4*ndims)
-
-        enc3, x = self.encode3(x)       # H/4 x W/4 x (8*ndims)  || H/8 x W/8 x (8*ndims)
-
-        enc4, x = self.encode4(x)       # H/8 x W/8 x (16*ndims) || H/16 x W/16 x (16*ndims)
+        enc_features = []
+        for encoder in self.encoders:
+            enc, x = encoder(x)
+            enc_features.append(enc)
 
         # Bottle Neck
-        x = self.bottle_neck(x)         # H/16 x W/16 x (16*ndims)
+        x = self.bottle_neck(x)
 
         # Decoder
-        x = self.decode4(x, enc4)       # H/8 x W/8 x (8*ndims)
-
-        x = self.decode3(x, enc3)       # H/4 x W/4 x (4*ndims)
-
-        x = self.decode2(x, enc2)       # H/2 x W/2 x (2*ndims)
-
-        x = self.decode1(x, enc1)       # H x W x ndims
+        for decoder, enc in zip(self.decoders, reversed(enc_features)):
+            x = decoder(x, enc)
 
         # Post-process
-        x = self.post_process(x)        # H x W x out_channels
-
+        x = self.post_process(x)
         return x
