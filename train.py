@@ -1,145 +1,204 @@
 import os
-import argparse
 import random
 
 import torch
-import matplotlib.pyplot as plt
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
 
+from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from tqdm import tqdm
-from models.unet import UNet
-from utils.dataset import prepare_data
-from utils.loss import CombinedLoss
 
-def get_args():
-    parser = argparse.ArgumentParser(description="Hyper-parameters for training")
+from models import UNet, PatchGAN
+from utils import (
+    PerceptualLoss,
+    ColorfulnessMetric,
+    epoch_summary,
+    prepare_data,
+    lab2rgb,
+    get_args
+)
 
-    parser.add_argument("--num_epochs", type=int, help="No. epochs for training", default=50)
-    parser.add_argument("--ndims", type=int, help="No. dimension of UNet", default=8)
-    parser.add_argument("--lr", type=float, help="Learning rate for optimizer", default=0.001)
-    parser.add_argument("--alpha", type=float, help="Weight of average loss", default=0.01)
-    parser.add_argument("--batch_size", type=int, help="Batch size of loading dataset", default=64)
-    parser.add_argument("--save_pth", type=str, help="Folder save checkpoint", default="./output")
-    parser.add_argument("--root", type=str, help="Data folder", default="./data")
-    parser.add_argument("--img_size", type=int, help="Image size", default=256)
+def val_model(args):
+    args.generator.eval()
 
-    args = parser.parse_args()
-    return args
+    total_samples = len(args.val_dataloader.dataset)
 
-def plot_loss(num_epochs, train_losses, val_losses, save_pth):
-    epochs = range(1, num_epochs+1)
-    plt.figure(figsize=(10, 5))
-    plt.plot(epochs, train_losses, label='Train Loss')
-    plt.plot(epochs, val_losses, label='Validate Loss')
-    plt.title('Training & Validate loss arcording to Epoch')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.grid()
-    plt.savefig(os.path.join(save_pth, "loss.png"), dpi=300, bbox_inches='tight')
+    psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(args.device)
+    ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(args.device)
+    fid_metric = FrechetInceptionDistance(feature=2048, normalize=True).to(args.device)
 
-def val_model(model, val_dataloader, criterion, device):
-    model.eval()
-
-    total_val_mse_loss, total_val_percept_loss, total_val_loss = 0.0, 0.0, 0.0
-    total_samples = len(val_dataloader.dataset)
-
-    psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(device)
-    ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
-
-    total_psnr = 0.0
-    total_ssim = 0.0
+    total_psnr = total_ssim = total_delta_cf = 0.0
 
     with torch.no_grad():
-        for inputs, targets in val_dataloader:
-            inputs, targets = inputs.to(device), targets.to(device)
+        for inputs, targets in args.val_dataloader:
+            inputs, targets = inputs.to(args.device), targets.to(args.device)
             batch = inputs.size(0)
 
-            preds = model(inputs)
-            val_mse_loss, val_percept_loss, val_loss = criterion(preds, targets)
+            preds = args.generator(inputs)
 
-            total_val_mse_loss += val_mse_loss.item() * batch
-            total_val_percept_loss += val_percept_loss.item() * batch
-            total_val_loss += val_loss.item() * batch
+            if args.color_mode == "lab":
+                preds_for_metrics = lab2rgb(inputs, preds)
+                targets_for_metrics = lab2rgb(inputs, targets)
+            else:
+                preds_for_metrics = preds
+                targets_for_metrics = targets
 
-            preds_ = (preds + 1.0) / 2
-            targets_ = (targets + 1.0) / 2
+            total_psnr += psnr_metric(preds_for_metrics, targets_for_metrics).item() * batch
+            total_ssim += ssim_metric(preds_for_metrics, targets_for_metrics).item() * batch
 
-            total_psnr += psnr_metric(preds_, targets_).item() * batch
-            total_ssim += ssim_metric(preds_, targets_).item() * batch
+            cf_preds = ColorfulnessMetric(preds_for_metrics, reduction="sum")
+            cf_targets = ColorfulnessMetric(targets_for_metrics, reduction="sum")
+            total_delta_cf += torch.abs(cf_preds-cf_targets).item()
 
-    avg_val_mse_loss = total_val_mse_loss / total_samples
-    avg_val_percept_loss = total_val_percept_loss / total_samples
-    avg_val_loss = total_val_loss / total_samples
+            # FID Score
+            preds_for_metrics = F.interpolate(preds_for_metrics, size=(299, 299), mode="bilinear", align_corners=False)
+            targets_for_metrics = F.interpolate(targets_for_metrics, size=(299, 299), mode="bilinear", align_corners=False)
 
+            fid_metric.update(targets_for_metrics, real=True)
+            fid_metric.update(preds_for_metrics, real=False)
+
+    avg_val_fid = fid_metric.compute().item()
     avg_val_psnr = total_psnr / total_samples
     avg_val_ssim = total_ssim / total_samples
-    return avg_val_mse_loss, avg_val_percept_loss, avg_val_loss, avg_val_psnr, avg_val_ssim
-def train_model(num_epochs, model, train_dataloader, val_dataloader, optimizer, scheduler, criterion, device, save_pth):
-    os.makedirs(save_pth, exist_ok=True)
+    avg_val_delta_cf = total_delta_cf / total_samples
+    return avg_val_fid, avg_val_psnr, avg_val_ssim, avg_val_delta_cf
 
-    train_losses, val_losses = [], []
-    max_psnr = 0.0
+def train_model(args):
+    os.makedirs(args.save_pth, exist_ok=True)
 
-    total_samples = len(train_dataloader.dataset)
+    min_fid = float("inf")
+    psnr = ssim = delta_cf = 0.0
 
-    for epoch in range(1, num_epochs+1):
-        model.train()
-        total_train_mse_loss, total_train_percept_loss, total_train_loss = 0.0, 0.0, 0.0
+    total_samples = len(args.train_dataloader.dataset)
 
-        pbar = tqdm(train_dataloader, desc=f"Epoch {epoch}/{num_epochs}", unit="batch", colour="RED")
+    # Determine training mode
+    use_gan = args.theta != 0
+    use_perceptual = args.beta != 0
+
+    for epoch in range(1, args.num_epochs + 1):
+        args.generator.train()
+        if use_gan:
+            args.discriminator.train()
+
+        total_train_pixel_loss = 0.0
+        total_train_percept_loss = 0.0 if use_perceptual else None
+        total_train_gen_loss = 0.0 if use_gan else None
+
+        pbar = tqdm(args.train_dataloader, desc=f"Epoch {epoch}/{args.num_epochs}", unit="batch", colour="GREEN", ncols=150)
 
         for inputs, targets in pbar:
-            inputs, targets = inputs.to(device), targets.to(device)
+            inputs, targets = inputs.to(args.device), targets.to(args.device)
             batch = inputs.size(0)
 
-            preds = model(inputs)
-            train_mse_loss, train_percept_loss, train_loss = criterion(preds, targets)
+            # Generate predictions
+            preds = args.generator(inputs)
 
-            total_train_mse_loss += train_mse_loss.item() * batch
-            total_train_percept_loss += train_percept_loss.item() * batch
-            total_train_loss += train_loss.item() * batch
+            # Training Discriminator (only if using GAN)
+            if use_gan:
+                args.disOptimizer.zero_grad()
 
-            optimizer.zero_grad()
+                preds_concat = torch.cat([inputs, preds], dim=1)
+                targets_concat = torch.cat([inputs, targets], dim=1)
+
+                # For real data
+                real_outputs = args.discriminator(targets_concat)
+                real_labels = torch.ones_like(real_outputs)
+                train_lossDis_real = args.gen_criterion(real_outputs, real_labels)
+
+                # For fake data
+                fake_outputs = args.discriminator(preds_concat.detach())  # Prevent gradient to Generator
+                fake_labels = torch.zeros_like(fake_outputs)
+                train_lossDis_fake = args.gen_criterion(fake_outputs, fake_labels)
+
+                train_lossDis = 0.5 * (train_lossDis_real + train_lossDis_fake)
+                train_lossDis.backward()
+                args.disOptimizer.step()
+
+            # Training Generator
+            args.genOptimizer.zero_grad()
+
+            # Compute losses
+            train_pixel_loss = args.pixel_criterion(preds, targets)
+
+            # Perceptual loss (if enabled)
+            if use_perceptual:
+                if args.color_mode == "lab":
+                    preds_for_perceptual = lab2rgb(inputs, preds)
+                    targets_for_perceptual = lab2rgb(inputs, targets)
+                else:
+                    preds_for_perceptual = preds
+                    targets_for_perceptual = targets
+
+                train_percept_loss = args.perceptual_criterion(preds_for_perceptual, targets_for_perceptual)
+                total_train_percept_loss += train_percept_loss.detach().item() * batch
+
+            # GAN loss (if enabled)
+            if use_gan:
+                preds_concat = torch.cat([inputs, preds], dim=1)
+                fake_outputs = args.discriminator(preds_concat)
+                fake_labels = torch.ones_like(fake_outputs)
+                train_gen_loss = 0.5 * args.gen_criterion(fake_outputs, fake_labels)
+                total_train_gen_loss += train_gen_loss.detach().item() * batch
+
+            # Combine losses
+            train_loss = args.alpha * train_pixel_loss
+            if use_perceptual:
+                train_loss += args.beta * train_percept_loss
+            if use_gan:
+                train_loss += args.theta * train_gen_loss
+
             train_loss.backward()
-            optimizer.step()
+            args.genOptimizer.step()
 
-            pbar.set_postfix({"Total loss": f"{train_loss.item():.4f}"})
+            total_train_pixel_loss += train_pixel_loss.detach().item() * batch
 
-        avg_train_mse_loss = total_train_mse_loss / total_samples
-        avg_train_percept_loss = total_train_percept_loss / total_samples
-        avg_train_loss = total_train_loss / total_samples
+            # Update progress bar
+            postfix_dict = {'Pixel': f'{train_pixel_loss.item():.4f}'}
+            if use_perceptual:
+                postfix_dict['Perceptual'] = f'{train_percept_loss.item():.4f}'
+            if use_gan:
+                postfix_dict['Gen'] = f'{train_gen_loss.item():.4f}'
+            pbar.set_postfix(postfix_dict)
 
-        avg_val_mse_loss, avg_val_percept_loss, avg_val_loss, avg_val_psnr, avg_val_ssim = val_model(model, val_dataloader, criterion, device)
+        # Calculate average losses
+        avg_train_pixel_loss = total_train_pixel_loss / total_samples
+        avg_train_percept_loss = total_train_percept_loss / total_samples if use_perceptual else None
+        avg_train_gen_loss = total_train_gen_loss / total_samples if use_gan else None
 
-        train_losses.append(avg_train_loss)
-        val_losses.append(avg_val_loss)
+        avg_val_fid, avg_val_psnr, avg_val_ssim, avg_val_delta_cf = val_model(args)
 
-        # Step the scheduler
-        scheduler.step()
-        print(f"Train:    MSE loss = {avg_train_mse_loss:.4f}, Perceptual loss = {avg_train_percept_loss:.4f}, Total loss = {avg_train_loss:.4f}")
-        print(f"Validate: MSE loss = {avg_val_mse_loss:.4f}, Perceptual loss = {avg_val_percept_loss:.4f}, Total loss = {avg_val_loss:.4f}")
-        print(f"PSNR = {avg_val_psnr:.4f}, SSIM = {avg_val_ssim:.4f}")
+        # Step the Scheduler
+        args.genScheduler.step()
+        if use_gan:
+            args.disScheduler.step()
+
+        # Information
+        epoch_summary(
+            epoch=epoch, avg_val_fid=avg_val_fid, avg_val_psnr=avg_val_psnr, avg_val_ssim=avg_val_ssim, avg_val_delta_cf=avg_val_delta_cf,
+            train_mse_loss=avg_train_pixel_loss, train_percept_loss=avg_train_percept_loss, train_gen_loss=avg_train_gen_loss
+        )
 
         # Save last model
         torch.save(
-            model.state_dict(),
-            os.path.join(save_pth, "last_model.pt")
+            args.generator.state_dict(),
+            os.path.join(args.save_pth, f"generator_last.pt")
         )
 
         # Save best model
-        if avg_val_psnr > max_psnr:
-            max_psnr = avg_val_psnr
+        if avg_val_fid < min_fid:
+            min_fid, psnr, ssim, delta_cf = avg_val_fid, avg_val_psnr, avg_val_ssim, avg_val_delta_cf
             torch.save(
-                model.state_dict(),
-                os.path.join(save_pth, "best_model.pt")
+                args.generator.state_dict(),
+                os.path.join(args.save_pth, f"generator_best.pt")
             )
-            print(f"Save best model at Epoch {epoch} !!!\n")
 
-    plot_loss(num_epochs, train_losses, val_losses, save_pth)
-    print(f"Completed training with best PSNR = {max_psnr}.")
+            print(f"\nSave best model at Epoch {epoch} !!!\n")
 
-def main(num_epochs, ndims, lr, batch_size, alpha, save_pth, root, img_size):
+    print(f"\nCompleted training with best FID = {min_fid:.4f}, PSNR = {psnr:.4f}, SSIM = {ssim:.4f}, ΔCF = {delta_cf:.4f}!!!")
+
+def main(args):
     # Fixed random
     seed = 412
     random.seed(seed)
@@ -147,33 +206,70 @@ def main(num_epochs, ndims, lr, batch_size, alpha, save_pth, root, img_size):
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
 
+    # Check color mode for training
+    args.color_mode = args.color_mode.lower()
+    if args.color_mode not in ("rgb", "lab"):
+        raise ValueError(f"Invalid color_mode '{args.color_mode}' => Expected 'rgb' or 'lab' !")
+
+    print(f"[COLOR] Training {args.color_mode} image with {args.type_loss} loss !")
+
     # Preprare data for training
-    train_dataloader = prepare_data(root=root, split="train", batch_size=batch_size, img_size=img_size)
-    val_dataloader = prepare_data(root=root, split="dev", batch_size=batch_size, img_size=img_size)
-    print(f"[DATASET] {len(train_dataloader.dataset)} train samples & {len(val_dataloader.dataset)} validate samples")
+    args.train_dataloader = prepare_data(root=args.root, split="train", batch_size=args.batch_size, img_size=args.img_size, color_mode=args.color_mode)
+    args.val_dataloader = prepare_data(root=args.root, split="dev", batch_size=args.batch_size, img_size=args.img_size, color_mode=args.color_mode)
+    print(f"[DATASET] {len(args.train_dataloader.dataset):,} train samples & {len(args.val_dataloader.dataset):,} validate samples !")
 
-    # Prepare model, optimizer and loss function
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = UNet(ndims=ndims).to(device)
-    print(f"[UNET]    {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable params")
+    args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+    # Load model
+    if args.color_mode == "lab":
+        args.generator = UNet(ndims=args.ndims, out_channels=2, depths=args.depths, num_blocks=args.num_blocks).to(args.device)
+    else:
+        args.generator = UNet(ndims=args.ndims, out_channels=3, depths=args.depths, num_blocks=args.num_blocks).to(args.device)
 
-    criterion = CombinedLoss(alpha=alpha).to(device)
-    print(f"[LOSS]    Total loss = MSE loss + {alpha} * Perceptual loss")
+    print(f"[GENERATOR] {sum(p.numel() for p in args.generator.parameters() if p.requires_grad):,} trainable params !")
+
+    # Optimizer and Scheduler
+    args.genOptimizer = optim.Adam(args.generator.parameters(), args.lr, (0.5, 0.999))
+    args.genScheduler = torch.optim.lr_scheduler.CosineAnnealingLR(args.genOptimizer, T_max=args.num_epochs)
+
+    # Loss function
+    args.type_loss = args.type_loss.upper()
+    if args.type_loss == "L1":
+        args.pixel_criterion = nn.L1Loss().to(args.device)
+    elif args.type_loss in ("L2", "MSE"):
+        args.pixel_criterion = nn.MSELoss().to(args.device)
+    else:
+        raise ValueError(f"Invalid type_loss '{args.type_loss}' => Expected 'L1', 'L2', or 'MSE' !")
 
     # Training phase
-    train_model(
-        num_epochs, model, train_dataloader, val_dataloader,
-        optimizer, scheduler, criterion, device, save_pth
-    )
+    if args.theta != 0:
+        # Train with GAN
+        args.gen_criterion = nn.MSELoss().to(args.device)
+
+        if args.color_mode == "lab":
+            args.discriminator = PatchGAN(in_channels=3).to(args.device)
+        else:
+            args.discriminator = PatchGAN(in_channels=4).to(args.device)
+
+        args.disOptimizer = optim.Adam(args.discriminator.parameters(), args.lr / 4, (0.5, 0.999))
+        args.disScheduler = torch.optim.lr_scheduler.CosineAnnealingLR(args.disOptimizer, T_max=args.num_epochs)
+
+        print(f"[DISCRIMINATOR] {sum(p.numel() for p in args.discriminator.parameters() if p.requires_grad):,} trainable params !")
+
+        if args.beta != 0:
+            print("[TRAINING] U-Net with Perceptual and GAN !!!\n")
+            args.perceptual_criterion = PerceptualLoss().to(args.device)
+        else:
+            print("[TRAINING] U-Net with GAN !!!\n")
+    else:
+        # Train without GAN
+        print("[TRAINING] U-Net with Perceptual !!!\n")
+        args.perceptual_criterion = PerceptualLoss().to(args.device)
+
+    # Training
+    train_model(args)
 
 if __name__ == "__main__":
     args = get_args()
 
-    main(
-        num_epochs=args.num_epochs, lr=args.lr, batch_size=args.batch_size,
-        alpha=args.alpha, ndims=args.ndims, save_pth=args.save_pth, root=args.root,
-        img_size=args.img_size
-    )
+    main(args)
