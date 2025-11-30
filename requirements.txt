@@ -5,3 +5,4 @@ matplotlib==3.7.2
 torchmetrics==1.8.2
 pillow==11.3.0
 facenet-pytorch==2.6.0
+kornia==0.8.1
